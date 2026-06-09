@@ -145,12 +145,14 @@ class ExplorerComponent {
 	/** Currently highlighted flat-entry index (0-based). */
 	private cursorIdx = 0;
 
-	// cache
+	// cache (keyed by width AND height so a vertical resize re-renders)
 	private cachedWidth?: number;
+	private cachedHeight?: number;
 	private cachedLines?: string[];
 	/** Cached flat list — rebuilt when tree changes. */
 	private flatList: FlatEntry[] = [];
 
+	/** Viewport rows incl. footer; set each render from the framework height. */
 	private visibleArea = 40;
 
 	/** Callback for on-demand tool invocation (L key). */
@@ -542,8 +544,15 @@ class ExplorerComponent {
 		this.scrollOffset = Math.min(maxScroll, Math.max(0, this.scrollOffset));
 	}
 
-	render(width: number): string[] {
-		if (this.cachedLines && this.cachedWidth === width) return this.cachedLines;
+	render(width: number, height = 40): string[] {
+		const H = Math.max(3, Math.floor(height));
+		this.visibleArea = H;
+		if (
+			this.cachedLines &&
+			this.cachedWidth === width &&
+			this.cachedHeight === H
+		)
+			return this.cachedLines;
 
 		const th = this.theme ?? defaultTheme;
 		const lines: string[] = [];
@@ -644,9 +653,9 @@ class ExplorerComponent {
 			}
 		}
 
-		// Keymap footer (pinned to bottom of 40-line viewport)
+		// Keymap footer (pinned to the bottom of the viewport)
 		const th2 = this.theme ?? defaultTheme;
-		while (lines.length < 39) lines.push("");
+		while (lines.length < H - 1) lines.push("");
 		lines.push(
 			th2.fg(
 				"dim",
@@ -659,12 +668,14 @@ class ExplorerComponent {
 		);
 
 		this.cachedWidth = width;
+		this.cachedHeight = H;
 		this.cachedLines = lines;
 		return lines;
 	}
 
 	invalidate(): void {
 		this.cachedWidth = undefined;
+		this.cachedHeight = undefined;
 		this.cachedLines = undefined;
 	}
 }
@@ -752,8 +763,8 @@ export default function (pi: ExtensionAPI) {
 				handleInput(data: string): void {
 					explorer.handleInput(data);
 				},
-				render(width: number): string[] {
-					return explorer.render(width);
+				render(width: number, height?: number): string[] {
+					return explorer.render(width, height);
 				},
 				invalidate(): void {
 					explorer.invalidate();
@@ -779,8 +790,11 @@ export default function (pi: ExtensionAPI) {
 		registered = false;
 		explorer.reset();
 
-		// Register tab immediately — framework shows empty state while we replay
+		// Register immediately, flag busy, and yield a frame so the loading
+		// placeholder paints before the synchronous replay runs.
 		registerTab();
+		pi.events.emit("sidepanel:busy", { tabId: "explorer", busy: true });
+		await new Promise((resolve) => setTimeout(resolve, 24));
 
 		try {
 			const entries = ctx.sessionManager.getEntries() as Array<{
@@ -882,10 +896,12 @@ export default function (pi: ExtensionAPI) {
 				}
 			}
 
-			// Emit invalidation so framework re-renders with full tree
-			pi.events.emit("sidepanel:invalidate", { tabId: "explorer" });
 		} catch {
 			// Replay failed — tab already registered with empty state
+		} finally {
+			// Clear the busy flag and re-render with the replayed tree.
+			pi.events.emit("sidepanel:busy", { tabId: "explorer", busy: false });
+			pi.events.emit("sidepanel:invalidate", { tabId: "explorer" });
 		}
 	});
 
