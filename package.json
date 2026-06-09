@@ -1,0 +1,10 @@
+{
+  "name": "pi-sidepanel-inputs",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Inputs tree tab for pi-sidepanel — shows explored directories as a collapsible tree from read/ls tool events, persisted across sessions",
+  "keywords": ["pi-package"],
+  "pi": {
+    "extensions": ["./index.ts"]
+  }
+}
