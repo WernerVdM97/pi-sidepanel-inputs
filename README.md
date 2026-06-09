@@ -1,5 +1,7 @@
 # pi-sidepanel-inputs
 
+> 🤖 This code is an AI-generated proof-of-concept. Use at your own risk.
+
 Interactive file explorer tree tab for [pi-sidepanel](https://github.com/WernerVdM97/pi-sidepanel). Builds a collapsible tree of directories and files as the agent explores them via `read` and `ls` tool invocations. Vim-style keyboard navigation, color-coded by read status with theme support. Session-persistent — tree replays on restart.
 
 <p align="center"><em>👆 Interactive — use keyboard to navigate, Enter to expand/collapse directories</em></p>
