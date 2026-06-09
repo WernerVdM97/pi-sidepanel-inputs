@@ -100,10 +100,15 @@ function connector(isLast: boolean): string {
 // ── ExplorerComponent ─────────────────────────────────────────────────────
 
 class ExplorerComponent {
+	/** Max number of nodes in the tree. Oldest-inaccessible evicted when exceeded. */
+	private static readonly MAX_NODES = 2_000;
+
 	/** Root nodes — top-level directories/files relative to CWD. */
 	private roots: TreeNode[] = [];
 	/** Quick lookup by absolute path. */
 	private nodeMap = new Map<string, TreeNode>();
+	/** Insertion order for LRU eviction (oldest first). */
+	private nodeOrder: string[] = [];
 	private scrollOffset = 0;
 	private followTail = true;
 	private theme: ThemeColors | null = null;
@@ -124,6 +129,7 @@ class ExplorerComponent {
 	reset(): void {
 		this.roots = [];
 		this.nodeMap.clear();
+		this.nodeOrder = [];
 		this.scrollOffset = 0;
 		this.followTail = true;
 		this.cursorIdx = 0;
@@ -255,6 +261,9 @@ class ExplorerComponent {
 				parent = node;
 				currentList = node.children;
 			} else {
+				// Evict oldest nodes if at capacity
+				this.evictNodes();
+
 				node = {
 					name: name,
 					path: builtPath,
@@ -264,6 +273,7 @@ class ExplorerComponent {
 					wasRead: false,
 				};
 				this.nodeMap.set(builtPath, node);
+				this.nodeOrder.push(builtPath);
 				currentList.push(node);
 				// Sort the list after insert
 				currentList.sort((a, b) => {
@@ -276,6 +286,34 @@ class ExplorerComponent {
 		}
 
 		return this.nodeMap.get(absolutePath)!;
+	}
+
+	/** Evict oldest nodes when over MAX_NODES. Keeps root nodes if possible. */
+	private evictNodes(): void {
+		while (this.nodeMap.size >= ExplorerComponent.MAX_NODES) {
+			const oldestPath = this.nodeOrder.shift();
+			if (!oldestPath) break;
+
+			const node = this.nodeMap.get(oldestPath);
+			if (!node) continue;
+
+			// Don't evict root nodes (direct children of cwd)
+			if (this.roots.includes(node)) {
+				// Move to end of order to give it more time, try next
+				this.nodeOrder.push(oldestPath);
+				continue;
+			}
+
+			// Remove from parent's children
+			const parentPath = path.dirname(oldestPath);
+			const parent = this.nodeMap.get(parentPath);
+			if (parent) {
+				const idx = parent.children.indexOf(node);
+				if (idx >= 0) parent.children.splice(idx, 1);
+			}
+
+			this.nodeMap.delete(oldestPath);
+		}
 	}
 
 	private rebuildFlatList(): void {
