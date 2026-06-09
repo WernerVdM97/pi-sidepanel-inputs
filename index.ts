@@ -27,6 +27,22 @@ interface TreeNode {
 	expanded: boolean;
 	/** Whether this node (or any descendant) was explicitly read by the agent */
 	wasRead: boolean;
+	/** Character count of file content (only set for file nodes after a read result) */
+	fileChars?: number;
+}
+
+// ── Token size helpers ────────────────────────────────────────────────────
+
+/** Estimate token count from character count (same heuristic as pi core). */
+function est(chars: number): number {
+	return Math.ceil(chars / 4);
+}
+
+/** Format token count for display. */
+function fmtTokens(n: number): string {
+	if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + "M";
+	if (n >= 1_000) return (n / 1_000).toFixed(1) + "K";
+	return String(n);
 }
 
 // ── Theme helpers ─────────────────────────────────────────────────────────
@@ -157,6 +173,14 @@ class ExplorerComponent {
 		this.ensurePath(parts, absolutePath, "directory");
 		this.rebuildFlatList();
 		this.invalidate();
+	}
+
+	/** Set the character count for a file (from read tool result). */
+	setFileSize(absolutePath: string, charCount: number): void {
+		const node = this.nodeMap.get(absolutePath);
+		if (node && node.type === "file") {
+			node.fileChars = charCount;
+		}
 	}
 
 	/** Ensure a file node exists under its parent directory (lazily creating the directory tree). */
@@ -473,11 +497,27 @@ class ExplorerComponent {
 				name = node.wasRead ? node.name : th.fg("dim", node.name);
 			}
 
-				const line = `${cursor}${prefix}${conn}${name}`;
-				const vw = visibleWidth(line);
-				lines.push(
-					vw > width ? truncateToWidth(line, width, "…", false) : line,
-				);
+				const base = `${cursor}${prefix}${conn}`;
+				const baseVw = visibleWidth(base);
+
+				// Token size badge: right-aligned for read files
+				if (node.type === "file" && node.wasRead && node.fileChars != null) {
+					const tokenStr = th.fg("dim", fmtTokens(est(node.fileChars)));
+					const tokenVw = visibleWidth(tokenStr);
+					const maxNameW = width - baseVw - 1 - tokenVw;
+					const nameDisplay = maxNameW > 0
+						? truncateToWidth(name, maxNameW, "…", false)
+						: name;
+					const nameVw = visibleWidth(nameDisplay);
+					const padding = " ".repeat(Math.max(1, width - baseVw - nameVw - tokenVw));
+					lines.push(base + nameDisplay + padding + tokenStr);
+				} else {
+					const line = `${base}${name}`;
+					const vw = visibleWidth(line);
+					lines.push(
+						vw > width ? truncateToWidth(line, width, "…", false) : line,
+					);
+				}
 			}
 		}
 
@@ -598,6 +638,7 @@ export default function (pi: ExtensionAPI) {
 			// Map toolCallId → dirPath for ls/find results to look up
 			const lsPaths = new Map<string, string>();
 			const findPaths = new Map<string, string>();
+			const readPaths = new Map<string, string>();
 
 			// Cap at last 300 entries to prevent memory blowup on large sessions
 			const capped = entries.slice(-300);
@@ -616,7 +657,10 @@ export default function (pi: ExtensionAPI) {
 
 						if (b.name === "read") {
 							const filePath = b.arguments?.path;
-							if (filePath) explorer.addFile(filePath);
+							if (filePath) {
+								explorer.addFile(filePath);
+								if (b.id) readPaths.set(b.id, filePath);
+							}
 						} else if (b.name === "ls") {
 							const dirPath = path.resolve(cwd, b.arguments?.path || ".");
 							explorer.ensureDir(dirPath);
@@ -643,6 +687,18 @@ export default function (pi: ExtensionAPI) {
 					if (parsed.length > 0) {
 						explorer.populateDirectory(dirPath, parsed);
 						nodeCount += parsed.length;
+					}
+				} else if (m.role === "toolResult" && m.toolName === "read") {
+					const filePath = readPaths.get(m.toolCallId ?? "");
+					if (!filePath) continue;
+
+					const blocks = Array.isArray(m.content) ? m.content : [];
+					const rawText = blocks
+						.filter((c: any) => c.type === "text")
+						.map((c: any) => c.text ?? "")
+						.join("");
+					if (rawText) {
+						explorer.setFileSize(filePath, rawText.length);
 					}
 				} else if (m.role === "toolResult" && m.toolName === "find") {
 					// find results are flat file paths — add each to the tree
@@ -691,9 +747,20 @@ export default function (pi: ExtensionAPI) {
 		}
 	});
 
-	// ── Tool result: capture ls + find output ─────────────────────────
+	// ── Tool result: capture read content size + ls/find output ────────
 
 	pi.on("tool_result", (event) => {
+		if (event.toolName === "read") {
+			const input = event.input as { path?: string };
+			if (input.path) {
+				const rawText = extractTextContent(event.content);
+				if (rawText) {
+					explorer.setFileSize(input.path, rawText.length);
+					pi.events.emit("sidepanel:invalidate", { tabId: "explorer" });
+				}
+			}
+			return;
+		}
 		if (event.toolName === "ls") {
 			const input = event.input as { path?: string };
 			const dirPath = path.resolve(cwd, input.path || ".");
