@@ -101,7 +101,9 @@ function connector(isLast: boolean): string {
 
 class ExplorerComponent {
 	/** Max number of nodes in the tree. Oldest-inaccessible evicted when exceeded. */
-	private static readonly MAX_NODES = 2_000;
+	private static readonly MAX_NODES = 500;
+	/** Maximum directory depth to track. Deep paths beyond this are ignored. */
+	private static readonly MAX_DEPTH = 12;
 
 	/** Root nodes — top-level directories/files relative to CWD. */
 	private roots: TreeNode[] = [];
@@ -211,10 +213,16 @@ class ExplorerComponent {
 
 		if (dirNode.type !== "directory") return;
 
-		// Merge children — only add new entries, don't clear existing
+		// Merge children — only add new entries, don't clear existing.
+		// Cap at 200 children per directory to prevent massive ls results
+		// (e.g. node_modules) from blowing up the tree.
+		const MAX_CHILDREN = 200;
 		const existingNames = new Set(dirNode.children.map((c) => c.name));
 		for (const entry of entries) {
 			if (existingNames.has(entry.name)) continue;
+			if (dirNode.children.length >= MAX_CHILDREN) break;
+			// Evict before adding to stay under global node cap
+			this.evictNodes();
 			const childPath = path.join(dirPath, entry.name);
 			const child: TreeNode = {
 				name: entry.name,
@@ -226,6 +234,7 @@ class ExplorerComponent {
 			};
 			dirNode.children.push(child);
 			this.nodeMap.set(childPath, child);
+			this.nodeOrder.push(childPath);
 		}
 
 		// Sort children: dirs first, then files, both alphabetically
@@ -245,15 +254,19 @@ class ExplorerComponent {
 
 	/** Ensure a path (split into parts) exists in the tree, returning the leaf node. */
 	private ensurePath(parts: string[], absolutePath: string, leafType: "file" | "directory"): TreeNode {
+		// Hard depth cap — truncate to MAX_DEPTH and return deepest ancestor
+		const cappedParts = parts.slice(0, ExplorerComponent.MAX_DEPTH);
+		const cappedPath = path.join(this.cwd, ...cappedParts);
+
 		// Walk from root
 		let parent: TreeNode | undefined;
 		let currentList = this.roots;
 		let builtPath = this.cwd;
 
-		for (let i = 0; i < parts.length; i++) {
-			const name = parts[i]!;
+		for (let i = 0; i < cappedParts.length; i++) {
+			const name = cappedParts[i]!;
 			builtPath = path.join(builtPath, name);
-			const isLast = i === parts.length - 1;
+			const isLast = i === cappedParts.length - 1;
 			const nodeType = isLast ? leafType : "directory";
 
 			let node = this.nodeMap.get(builtPath);
@@ -285,11 +298,12 @@ class ExplorerComponent {
 			}
 		}
 
-		return this.nodeMap.get(absolutePath)!;
+		return this.nodeMap.get(cappedPath)!;
 	}
 
 	/** Evict oldest nodes when over MAX_NODES. Keeps root nodes if possible. */
 	private evictNodes(): void {
+		let stuck = 0;
 		while (this.nodeMap.size >= ExplorerComponent.MAX_NODES) {
 			const oldestPath = this.nodeOrder.shift();
 			if (!oldestPath) break;
@@ -297,10 +311,11 @@ class ExplorerComponent {
 			const node = this.nodeMap.get(oldestPath);
 			if (!node) continue;
 
-			// Don't evict root nodes (direct children of cwd)
-			if (this.roots.includes(node)) {
+			// Don't evict root nodes (direct children of cwd) unless we're desperate
+			if (this.roots.includes(node) && stuck < 3) {
 				// Move to end of order to give it more time, try next
 				this.nodeOrder.push(oldestPath);
+				stuck++;
 				continue;
 			}
 
@@ -310,9 +325,14 @@ class ExplorerComponent {
 			if (parent) {
 				const idx = parent.children.indexOf(node);
 				if (idx >= 0) parent.children.splice(idx, 1);
+			} else {
+				// Orphaned root — remove from roots array
+				const rootIdx = this.roots.indexOf(node);
+				if (rootIdx >= 0) this.roots.splice(rootIdx, 1);
 			}
 
 			this.nodeMap.delete(oldestPath);
+			stuck = 0;
 		}
 	}
 
@@ -474,6 +494,22 @@ class ExplorerComponent {
 
 // ── LS output parsing ─────────────────────────────────────────────────────
 
+/** Parse find tool output text into an array of file paths. */
+function parseFindOutput(text: string, cwd: string): string[] {
+	const paths: string[] = [];
+	for (const line of text.split("\n")) {
+		const trimmed = line.trim();
+		if (!trimmed) continue;
+		// Skip truncation hints and header lines
+		if (trimmed.startsWith("[") && trimmed.endsWith("]")) continue;
+		if (trimmed.startsWith("...")) continue;
+		// Resolve relative paths to absolute
+		const resolved = path.isAbsolute(trimmed) ? trimmed : path.resolve(cwd, trimmed);
+		paths.push(resolved);
+	}
+	return paths;
+}
+
 /** Parse ls tool output text into {name, isDir} entries. */
 function parseLsOutput(text: string): { name: string; isDir: boolean }[] {
 	const entries: { name: string; isDir: boolean }[] = [];
@@ -559,12 +595,16 @@ export default function (pi: ExtensionAPI) {
 				};
 			}>;
 
-			// Map toolCallId → dirPath for ls results to look up
+			// Map toolCallId → dirPath for ls/find results to look up
 			const lsPaths = new Map<string, string>();
+			const findPaths = new Map<string, string>();
 
-			// Cap at last 1000 entries to prevent freeze on huge sessions
-			const capped = entries.slice(-1000);
+			// Cap at last 300 entries to prevent memory blowup on large sessions
+			const capped = entries.slice(-300);
+			let nodeCount = 0;
 			for (const e of capped) {
+				// Hard stop: don't build more than 500 nodes during replay
+				if (nodeCount >= 500) break;
 				if (e.type !== "message") continue;
 				const m = e.message;
 				if (!m) continue;
@@ -581,6 +621,10 @@ export default function (pi: ExtensionAPI) {
 							const dirPath = path.resolve(cwd, b.arguments?.path || ".");
 							explorer.ensureDir(dirPath);
 							if (b.id) lsPaths.set(b.id, dirPath);
+						} else if (b.name === "find") {
+							const findDir = path.resolve(cwd, b.arguments?.path || ".");
+							explorer.ensureDir(findDir);
+							if (b.id) findPaths.set(b.id, findDir);
 						}
 					}
 				} else if (m.role === "toolResult" && m.toolName === "ls") {
@@ -594,9 +638,26 @@ export default function (pi: ExtensionAPI) {
 						.join("");
 					if (!rawText) continue;
 
-					const parsed = parseLsOutput(rawText);
+					// Cap ls output to first 100 entries
+					const parsed = parseLsOutput(rawText).slice(0, 100);
 					if (parsed.length > 0) {
 						explorer.populateDirectory(dirPath, parsed);
+						nodeCount += parsed.length;
+					}
+				} else if (m.role === "toolResult" && m.toolName === "find") {
+					// find results are flat file paths — add each to the tree
+					const blocks = Array.isArray(m.content) ? m.content : [];
+					const rawText = blocks
+						.filter((c: any) => c.type === "text")
+						.map((c: any) => c.text ?? "")
+						.join("");
+					if (!rawText) continue;
+
+					// Cap find results to first 100 paths
+					const foundPaths = parseFindOutput(rawText, cwd).slice(0, 100);
+					for (const fp of foundPaths) {
+						explorer.addFile(fp);
+						nodeCount++;
 					}
 				}
 			}
@@ -621,23 +682,39 @@ export default function (pi: ExtensionAPI) {
 			const dirPath = path.resolve(cwd, input.path || ".");
 			explorer.ensureDir(dirPath);
 			pi.events.emit("sidepanel:invalidate", { tabId: "explorer" });
+		} else if (event.toolName === "find") {
+			// Ensure search directory node exists.
+			const input = event.input as { path?: string };
+			const dirPath = path.resolve(cwd, input.path || ".");
+			explorer.ensureDir(dirPath);
+			pi.events.emit("sidepanel:invalidate", { tabId: "explorer" });
 		}
 	});
 
-	// ── Tool result: capture ls output ────────────────────────────────
+	// ── Tool result: capture ls + find output ─────────────────────────
 
 	pi.on("tool_result", (event) => {
-		if (event.toolName !== "ls") return;
+		if (event.toolName === "ls") {
+			const input = event.input as { path?: string };
+			const dirPath = path.resolve(cwd, input.path || ".");
 
-		const input = event.input as { path?: string };
-		const dirPath = path.resolve(cwd, input.path || ".");
+			const rawText = extractTextContent(event.content);
+			if (!rawText) return;
 
-		const rawText = extractTextContent(event.content);
-		if (!rawText) return;
+			const entries = parseLsOutput(rawText);
+			if (entries.length > 0) {
+				explorer.populateDirectory(dirPath, entries);
+				pi.events.emit("sidepanel:invalidate", { tabId: "explorer" });
+			}
+		} else if (event.toolName === "find") {
+			const rawText = extractTextContent(event.content);
+			if (!rawText) return;
 
-		const entries = parseLsOutput(rawText);
-		if (entries.length > 0) {
-			explorer.populateDirectory(dirPath, entries);
+			// find returns flat file paths — add each to the tree
+			const foundPaths = parseFindOutput(rawText, cwd).slice(0, 100);
+			for (const fp of foundPaths) {
+				explorer.addFile(fp);
+			}
 			pi.events.emit("sidepanel:invalidate", { tabId: "explorer" });
 		}
 	});

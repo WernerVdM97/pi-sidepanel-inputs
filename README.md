@@ -1,6 +1,6 @@
 # pi-sidepanel-inputs
 
-Interactive file explorer tree tab for [pi-sidepanel](../pi-sidepanel). Builds a collapsible tree of directories and files as the agent explores them via `read` and `ls` tool invocations. Vim-style keyboard navigation, color-coded by read status with theme support. Session-persistent — tree replays on restart.
+Interactive file explorer tree tab for [pi-sidepanel](https://github.com/WernerVdM97/pi-sidepanel). Builds a collapsible tree of directories and files as the agent explores them via `read` and `ls` tool invocations. Vim-style keyboard navigation, color-coded by read status with theme support. Session-persistent — tree replays on restart.
 
 <p align="center"><em>👆 Interactive — use keyboard to navigate, Enter to expand/collapse directories</em></p>
 
@@ -47,11 +47,11 @@ Files and directories appear as the agent discovers them. Directories auto-expan
 
 ## Session persistence
 
-On `session_start`, the tab replays all `read` and `ls` invocations from the session history to rebuild the tree. Capped at last 1,000 entries.
+On `session_start`, the tab replays all `read`, `ls`, and `find` invocations from the session history to rebuild the tree. Capped at last 300 entries.
 
 ## Memory safety
 
-Tree capped at **2,000 nodes** with LRU eviction of oldest leaf nodes. Root-level directories are preserved to maintain tree structure.
+Tree capped at **500 nodes** with LRU eviction. Per-directory children capped at 200. Max depth 12. Replay hard-stops at 500 nodes.
 
 ## Architecture
 
