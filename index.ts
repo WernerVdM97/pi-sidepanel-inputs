@@ -134,6 +134,8 @@ class ExplorerComponent {
 	private nodeMap = new Map<string, TreeNode>();
 	/** Insertion order for LRU eviction (oldest first). */
 	private nodeOrder: string[] = [];
+	/** Paths queued via L key but not yet processed by the agent. */
+	private pendingPaths = new Set<string>();
 	private scrollOffset = 0;
 	private followTail = true;
 	private theme: ThemeColors | null = null;
@@ -150,12 +152,17 @@ class ExplorerComponent {
 	private visibleArea = 40;
 
 	/** Callback for on-demand tool invocation (L key). */
-	private onInvokeTool?: (toolName: string, input: Record<string, unknown>) => void;
+	private onInvokeTool?: (
+		toolName: string,
+		input: Record<string, unknown>,
+	) => void;
 
 	constructor(private cwd: string) {}
 
 	/** Wire the L-key tool invoker from the extension. */
-	setToolInvoker(fn: (toolName: string, input: Record<string, unknown>) => void): void {
+	setToolInvoker(
+		fn: (toolName: string, input: Record<string, unknown>) => void,
+	): void {
 		this.onInvokeTool = fn;
 	}
 
@@ -163,6 +170,7 @@ class ExplorerComponent {
 		this.roots = [];
 		this.nodeMap.clear();
 		this.nodeOrder = [];
+		this.pendingPaths.clear();
 		this.scrollOffset = 0;
 		this.followTail = true;
 		this.cursorIdx = 0;
@@ -195,6 +203,19 @@ class ExplorerComponent {
 		const node = this.nodeMap.get(absolutePath);
 		if (node && node.type === "file") {
 			node.fileChars = charCount;
+		}
+	}
+
+	/** Mark a path as pending (user pressed L, waiting for agent). */
+	markPending(absolutePath: string): void {
+		this.pendingPaths.add(absolutePath);
+		this.invalidate();
+	}
+
+	/** Clear pending marker when agent actually processes the path. */
+	clearPending(absolutePath: string): void {
+		if (this.pendingPaths.delete(absolutePath)) {
+			this.invalidate();
 		}
 	}
 
@@ -394,11 +415,11 @@ class ExplorerComponent {
 		}
 	}
 
-	// ── Component interface ──────────────────────────────────────────
+	// ══ Component interface ──────────────────────────────────────────
 
 	handleInput(data: string): void {
-		// L: invoke ls on directory or read on file
-		if (data === "L") {
+		// L or l: invoke ls on directory or read on file
+		if (data === "L" || data === "l") {
 			const entry = this.flatList[this.cursorIdx];
 			if (entry && this.onInvokeTool) {
 				if (entry.node.type === "directory") {
@@ -523,22 +544,33 @@ class ExplorerComponent {
 				const cursor = isCursor ? th.fg("accent", ">") : " ";
 
 				let name: string;
+				const isPending = !node.wasRead && this.pendingPaths.has(node.path);
 				if (node.type === "directory") {
-					// Folders: orange
+					// Folders: orange if read, warning if pending, dim otherwise
 					if (node.wasRead) {
 						name = th.fg("syntaxNumber", th.bold(node.name)) + "/";
+					} else if (isPending) {
+						name = th.fg("warning", node.name) + "/";
 					} else {
 						name = th.fg("dim", node.name) + "/";
 					}
 				} else if (node.name.endsWith(".md")) {
-					// Markdown: blue
+					// Markdown: blue if read, warning if pending, dim otherwise
 					if (node.wasRead) {
 						name = th.fg("syntaxFunction", node.name);
+					} else if (isPending) {
+						name = th.fg("warning", node.name);
 					} else {
 						name = th.fg("dim", node.name);
 					}
 				} else {
-					name = node.wasRead ? node.name : th.fg("dim", node.name);
+					if (node.wasRead) {
+						name = node.name;
+					} else if (isPending) {
+						name = th.fg("warning", node.name);
+					} else {
+						name = th.fg("dim", node.name);
+					}
 				}
 
 				const base = `${cursor}${prefix}${conn}`;
@@ -565,6 +597,19 @@ class ExplorerComponent {
 				}
 			}
 		}
+
+		// Keymap footer
+		const th2 = this.theme ?? defaultTheme;
+		lines.push(
+			th2.fg(
+				"dim",
+				truncateToWidth(
+					" j/k navigate │ Enter expand │ l/L queue │ g/G top/bot",
+					width,
+					"",
+				),
+			),
+		);
 
 		this.cachedWidth = width;
 		this.cachedLines = lines;
@@ -632,34 +677,18 @@ export default function (pi: ExtensionAPI) {
 	const explorer = new ExplorerComponent(cwd);
 	let registered = false;
 
-	// Wire L-key tool invoker: exec ls/cat directly via pi.exec
-	explorer.setToolInvoker(async (toolName, input) => {
+	// Wire L-key tool invoker: send read/ls as user prompt to the agent.
+	// Uses deliverAs: "followUp" so it queues when the agent is busy.
+	// Marks path as pending (warning color) until agent processes it.
+	// Source: pi.sendUserMessage() — extensions.md
+	explorer.setToolInvoker((toolName, input) => {
+		const targetPath = input.path as string;
+		explorer.markPending(targetPath);
+		pi.events.emit("sidepanel:invalidate", { tabId: "explorer" });
 		if (toolName === "ls") {
-			const dirPath = input.path as string;
-			try {
-				const result = await pi.exec("ls", ["-1", dirPath]);
-				if (result.stdout) {
-					const entries = parseLsOutput(result.stdout);
-					if (entries.length > 0) {
-						explorer.populateDirectory(dirPath, entries);
-						pi.events.emit("sidepanel:invalidate", { tabId: "explorer" });
-					}
-				}
-			} catch {
-				// ls failed — silently ignore
-			}
+			pi.sendUserMessage(`list the contents of ${targetPath}`, { deliverAs: "followUp" });
 		} else if (toolName === "read") {
-			const filePath = input.path as string;
-			try {
-				const result = await pi.exec("cat", [filePath]);
-				if (result.stdout) {
-					explorer.addFile(filePath);
-					explorer.setFileSize(filePath, result.stdout.length);
-					pi.events.emit("sidepanel:invalidate", { tabId: "explorer" });
-				}
-			} catch {
-				// read failed — silently ignore
-			}
+			pi.sendUserMessage(`read the file ${targetPath}`, { deliverAs: "followUp" });
 		}
 	});
 
@@ -810,6 +839,7 @@ export default function (pi: ExtensionAPI) {
 		if (event.toolName === "read") {
 			const input = event.input as { path?: string };
 			if (input.path) {
+				explorer.clearPending(input.path);
 				explorer.addFile(input.path);
 			}
 			pi.events.emit("sidepanel:invalidate", { tabId: "explorer" });
@@ -817,6 +847,7 @@ export default function (pi: ExtensionAPI) {
 			// Ensure directory node exists before results return.
 			const input = event.input as { path?: string };
 			const dirPath = path.resolve(cwd, input.path || ".");
+			explorer.clearPending(dirPath);
 			explorer.ensureDir(dirPath);
 			pi.events.emit("sidepanel:invalidate", { tabId: "explorer" });
 		} else if (event.toolName === "find") {
