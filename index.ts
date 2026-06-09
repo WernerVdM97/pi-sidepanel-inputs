@@ -149,7 +149,15 @@ class ExplorerComponent {
 
 	private visibleArea = 40;
 
+	/** Callback for on-demand tool invocation (L key). */
+	private onInvokeTool?: (toolName: string, input: Record<string, unknown>) => void;
+
 	constructor(private cwd: string) {}
+
+	/** Wire the L-key tool invoker from the extension. */
+	setToolInvoker(fn: (toolName: string, input: Record<string, unknown>) => void): void {
+		this.onInvokeTool = fn;
+	}
 
 	reset(): void {
 		this.roots = [];
@@ -389,6 +397,19 @@ class ExplorerComponent {
 	// ── Component interface ──────────────────────────────────────────
 
 	handleInput(data: string): void {
+		// L: invoke ls on directory or read on file
+		if (data === "L") {
+			const entry = this.flatList[this.cursorIdx];
+			if (entry && this.onInvokeTool) {
+				if (entry.node.type === "directory") {
+					this.onInvokeTool("ls", { path: entry.node.path });
+				} else {
+					this.onInvokeTool("read", { path: entry.node.path });
+				}
+			}
+			return;
+		}
+
 		if (matchesKey(data, "enter")) {
 			this.toggleCurrent();
 			return;
@@ -610,6 +631,37 @@ export default function (pi: ExtensionAPI) {
 	const cwd = process.cwd();
 	const explorer = new ExplorerComponent(cwd);
 	let registered = false;
+
+	// Wire L-key tool invoker: exec ls/cat directly via pi.exec
+	explorer.setToolInvoker(async (toolName, input) => {
+		if (toolName === "ls") {
+			const dirPath = input.path as string;
+			try {
+				const result = await pi.exec("ls", ["-1", dirPath]);
+				if (result.stdout) {
+					const entries = parseLsOutput(result.stdout);
+					if (entries.length > 0) {
+						explorer.populateDirectory(dirPath, entries);
+						pi.events.emit("sidepanel:invalidate", { tabId: "explorer" });
+					}
+				}
+			} catch {
+				// ls failed — silently ignore
+			}
+		} else if (toolName === "read") {
+			const filePath = input.path as string;
+			try {
+				const result = await pi.exec("cat", [filePath]);
+				if (result.stdout) {
+					explorer.addFile(filePath);
+					explorer.setFileSize(filePath, result.stdout.length);
+					pi.events.emit("sidepanel:invalidate", { tabId: "explorer" });
+				}
+			} catch {
+				// read failed — silently ignore
+			}
+		}
+	});
 
 	function registerTab(): void {
 		if (registered) return;
