@@ -29,6 +29,8 @@ interface TreeNode {
 	wasRead: boolean;
 	/** Character count of file content (only set for file nodes after a read result) */
 	fileChars?: number;
+	/** Cumulative estimated token count of all read descendant files with known sizes. Set on directories. */
+	dirTokens?: number;
 }
 
 // ── Token size helpers ────────────────────────────────────────────────────
@@ -201,8 +203,27 @@ class ExplorerComponent {
 	/** Set the character count for a file (from read tool result). */
 	setFileSize(absolutePath: string, charCount: number): void {
 		const node = this.nodeMap.get(absolutePath);
-		if (node && node.type === "file") {
-			node.fileChars = charCount;
+		if (!node || node.type !== "file") return;
+
+		// Compute token delta to propagate up to ancestor directories
+		const oldEst = node.fileChars != null ? est(node.fileChars) : 0;
+		node.fileChars = charCount;
+		const newEst = est(charCount);
+		const delta = newEst - oldEst;
+
+		let currentPath = path.dirname(absolutePath);
+		let prevPath = absolutePath;
+		while (
+			currentPath &&
+			currentPath !== this.cwd &&
+			currentPath !== prevPath
+		) {
+			const ancestor = this.nodeMap.get(currentPath);
+			if (ancestor && ancestor.type === "directory") {
+				ancestor.dirTokens = (ancestor.dirTokens ?? 0) + delta;
+			}
+			prevPath = currentPath;
+			currentPath = path.dirname(currentPath);
 		}
 	}
 
@@ -418,17 +439,21 @@ class ExplorerComponent {
 	// ══ Component interface ──────────────────────────────────────────
 
 	handleInput(data: string): void {
-		// l: invoke ls on directory or read on file
-		if (data === "l") {
+		// l/L: invoke ls on directory or read on file
+		if (data === "l" || data === "L") {
 			const entry = this.flatList[this.cursorIdx];
 			if (entry && this.onInvokeTool) {
-				if (entry.node.type === "directory") {
+				// Guard: don't re-queue files already pending or read
+				if (entry.node.type === "file") {
+					if (this.pendingPaths.has(entry.node.path) || entry.node.wasRead) {
+						return;
+					}
+					this.onInvokeTool("read", { path: entry.node.path });
+				} else {
 					// Clear stale children, re-populate from fresh ls
 					entry.node.children = [];
 					entry.node.expanded = false;
 					this.onInvokeTool("ls", { path: entry.node.path });
-				} else {
-					this.onInvokeTool("read", { path: entry.node.path });
 				}
 			}
 			return;
@@ -470,18 +495,18 @@ class ExplorerComponent {
 				moved = true;
 			}
 		} else if (matchesKey(data, "pageup")) {
-			const target = Math.max(0, this.cursorIdx - this.visibleArea);
-			if (this.cursorIdx !== target) {
-				this.cursorIdx = target;
+			const tgt = Math.max(0, this.cursorIdx - (this.visibleArea - 1));
+			if (this.cursorIdx !== tgt) {
+				this.cursorIdx = tgt;
 				moved = true;
 			}
 		} else if (matchesKey(data, "pagedown")) {
-			const target = Math.min(
+			const tgt = Math.min(
 				this.flatList.length - 1,
-				this.cursorIdx + this.visibleArea,
+				this.cursorIdx + (this.visibleArea - 1),
 			);
-			if (this.cursorIdx !== target) {
-				this.cursorIdx = target;
+			if (this.cursorIdx !== tgt) {
+				this.cursorIdx = tgt;
 				moved = true;
 			}
 		}
@@ -505,13 +530,15 @@ class ExplorerComponent {
 	}
 
 	private scrollToCursor(): void {
+		// Reserve 1 line for keymap footer
+		const treeViewH = this.visibleArea - 1;
 		if (this.cursorIdx < this.scrollOffset) {
 			this.scrollOffset = this.cursorIdx;
-		} else if (this.cursorIdx >= this.scrollOffset + this.visibleArea) {
-			this.scrollOffset = this.cursorIdx - this.visibleArea + 1;
+		} else if (this.cursorIdx >= this.scrollOffset + treeViewH) {
+			this.scrollOffset = this.cursorIdx - treeViewH + 1;
 		}
 		// Clamp
-		const maxScroll = Math.max(0, this.flatList.length - this.visibleArea);
+		const maxScroll = Math.max(0, this.flatList.length - treeViewH);
 		this.scrollOffset = Math.min(maxScroll, Math.max(0, this.scrollOffset));
 	}
 
@@ -533,9 +560,11 @@ class ExplorerComponent {
 				th.fg("dim", truncateToWidth(" read and ls tools.", width, "")),
 			);
 		} else {
+			// Reserve 1 line for the keymap footer
+			const treeViewH = this.visibleArea - 1;
 			const visible = this.flatList.slice(
 				this.scrollOffset,
-				this.scrollOffset + this.visibleArea,
+				this.scrollOffset + treeViewH,
 			);
 
 			for (const entry of visible) {
@@ -579,9 +608,23 @@ class ExplorerComponent {
 				const base = `${cursor}${prefix}${conn}`;
 				const baseVw = visibleWidth(base);
 
-				// Token size badge: right-aligned for read files
+				// Token badge: files get dim, directories get purple (syntaxKeyword)
+				let tokenEst: number | null = null;
+				let tokenColor = "dim";
 				if (node.type === "file" && node.wasRead && node.fileChars != null) {
-					const tokenStr = th.fg("dim", fmtTokens(est(node.fileChars)));
+					tokenEst = est(node.fileChars);
+				} else if (
+					node.type === "directory" &&
+					node.wasRead &&
+					node.dirTokens != null &&
+					node.dirTokens > 0
+				) {
+					tokenEst = node.dirTokens;
+					tokenColor = "syntaxKeyword";
+				}
+
+				if (tokenEst != null) {
+					const tokenStr = th.fg(tokenColor, fmtTokens(tokenEst));
 					const tokenVw = visibleWidth(tokenStr);
 					const maxNameW = width - baseVw - 1 - tokenVw;
 					const nameDisplay =
@@ -761,7 +804,12 @@ export default function (pi: ExtensionAPI) {
 			// Cap at last 300 entries to prevent memory blowup on large sessions
 			const capped = entries.slice(-300);
 			let nodeCount = 0;
-			for (const e of capped) {
+			for (let i = 0; i < capped.length; i++) {
+				const e = capped[i]!;
+				// Yield event loop every 10 entries to avoid UI freeze
+				if (i > 0 && i % 10 === 0) {
+					await new Promise((r) => setTimeout(r, 0));
+				}
 				// Hard stop: don't build more than 500 nodes during replay
 				if (nodeCount >= 500) break;
 				if (e.type !== "message") continue;
