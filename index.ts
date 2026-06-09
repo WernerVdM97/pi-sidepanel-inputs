@@ -86,9 +86,16 @@ function flattenTree(
 			ancestorLast: [...ancestorLast],
 		};
 		result.push(entry);
-		if (nodes[i]!.type === "directory" && nodes[i]!.expanded && nodes[i]!.children.length > 0) {
+		if (
+			nodes[i]!.type === "directory" &&
+			nodes[i]!.expanded &&
+			nodes[i]!.children.length > 0
+		) {
 			result.push(
-				...flattenTree(nodes[i]!.children, depth + 1, [...ancestorLast, isLast]),
+				...flattenTree(nodes[i]!.children, depth + 1, [
+					...ancestorLast,
+					isLast,
+				]),
 			);
 		}
 	}
@@ -211,7 +218,11 @@ class ExplorerComponent {
 	private propagateReadUp(node: TreeNode): void {
 		let currentPath = path.dirname(node.path);
 		let prevPath = node.path;
-		while (currentPath && currentPath !== this.cwd && currentPath !== prevPath) {
+		while (
+			currentPath &&
+			currentPath !== this.cwd &&
+			currentPath !== prevPath
+		) {
 			const ancestor = this.nodeMap.get(currentPath);
 			if (ancestor && !ancestor.wasRead) {
 				ancestor.wasRead = true;
@@ -222,7 +233,10 @@ class ExplorerComponent {
 	}
 
 	/** Populate a directory's children from ls tool output text. */
-	populateDirectory(dirPath: string, entries: { name: string; isDir: boolean }[]): void {
+	populateDirectory(
+		dirPath: string,
+		entries: { name: string; isDir: boolean }[],
+	): void {
 		let dirNode = this.nodeMap.get(dirPath);
 		if (!dirNode) {
 			// Create the directory node first
@@ -277,7 +291,11 @@ class ExplorerComponent {
 	}
 
 	/** Ensure a path (split into parts) exists in the tree, returning the leaf node. */
-	private ensurePath(parts: string[], absolutePath: string, leafType: "file" | "directory"): TreeNode {
+	private ensurePath(
+		parts: string[],
+		absolutePath: string,
+		leafType: "file" | "directory",
+	): TreeNode {
 		// Hard depth cap — truncate to MAX_DEPTH and return deepest ancestor
 		const cappedParts = parts.slice(0, ExplorerComponent.MAX_DEPTH);
 		const cappedPath = path.join(this.cwd, ...cappedParts);
@@ -413,7 +431,10 @@ class ExplorerComponent {
 				moved = true;
 			}
 		} else if (matchesKey(data, "pagedown")) {
-			const target = Math.min(this.flatList.length - 1, this.cursorIdx + this.visibleArea);
+			const target = Math.min(
+				this.flatList.length - 1,
+				this.cursorIdx + this.visibleArea,
+			);
 			if (this.cursorIdx !== target) {
 				this.cursorIdx = target;
 				moved = true;
@@ -456,7 +477,9 @@ class ExplorerComponent {
 		const lines: string[] = [];
 
 		if (this.flatList.length === 0) {
-			lines.push(th.fg("dim", truncateToWidth(" No files explored yet", width, "")));
+			lines.push(
+				th.fg("dim", truncateToWidth(" No files explored yet", width, "")),
+			);
 			lines.push("");
 			lines.push(
 				th.fg("dim", truncateToWidth(" Tree builds as agent uses", width, "")),
@@ -475,27 +498,27 @@ class ExplorerComponent {
 				const prefix = indentPrefix(ancestorLast, depth);
 				const conn = connector(isLast);
 
-			const isCursor = this.flatList.indexOf(entry) === this.cursorIdx;
-			const cursor = isCursor ? th.fg("accent", ">") : " ";
+				const isCursor = this.flatList.indexOf(entry) === this.cursorIdx;
+				const cursor = isCursor ? th.fg("accent", ">") : " ";
 
-			let name: string;
-			if (node.type === "directory") {
-				// Folders: orange
-				if (node.wasRead) {
-					name = th.fg("syntaxNumber", th.bold(node.name)) + "/";
+				let name: string;
+				if (node.type === "directory") {
+					// Folders: orange
+					if (node.wasRead) {
+						name = th.fg("syntaxNumber", th.bold(node.name)) + "/";
+					} else {
+						name = th.fg("dim", node.name) + "/";
+					}
+				} else if (node.name.endsWith(".md")) {
+					// Markdown: blue
+					if (node.wasRead) {
+						name = th.fg("syntaxFunction", node.name);
+					} else {
+						name = th.fg("dim", node.name);
+					}
 				} else {
-					name = th.fg("dim", node.name) + "/";
+					name = node.wasRead ? node.name : th.fg("dim", node.name);
 				}
-			} else if (node.name.endsWith(".md")) {
-				// Markdown: blue
-				if (node.wasRead) {
-					name = th.fg("syntaxFunction", node.name);
-				} else {
-					name = th.fg("dim", node.name);
-				}
-			} else {
-				name = node.wasRead ? node.name : th.fg("dim", node.name);
-			}
 
 				const base = `${cursor}${prefix}${conn}`;
 				const baseVw = visibleWidth(base);
@@ -505,11 +528,12 @@ class ExplorerComponent {
 					const tokenStr = th.fg("dim", fmtTokens(est(node.fileChars)));
 					const tokenVw = visibleWidth(tokenStr);
 					const maxNameW = width - baseVw - 1 - tokenVw;
-					const nameDisplay = maxNameW > 0
-						? truncateToWidth(name, maxNameW, "…", false)
-						: name;
+					const nameDisplay =
+						maxNameW > 0 ? truncateToWidth(name, maxNameW, "…", false) : name;
 					const nameVw = visibleWidth(nameDisplay);
-					const padding = " ".repeat(Math.max(1, width - baseVw - nameVw - tokenVw));
+					const padding = " ".repeat(
+						Math.max(1, width - baseVw - nameVw - tokenVw),
+					);
 					lines.push(base + nameDisplay + padding + tokenStr);
 				} else {
 					const line = `${base}${name}`;
@@ -544,7 +568,9 @@ function parseFindOutput(text: string, cwd: string): string[] {
 		if (trimmed.startsWith("[") && trimmed.endsWith("]")) continue;
 		if (trimmed.startsWith("...")) continue;
 		// Resolve relative paths to absolute
-		const resolved = path.isAbsolute(trimmed) ? trimmed : path.resolve(cwd, trimmed);
+		const resolved = path.isAbsolute(trimmed)
+			? trimmed
+			: path.resolve(cwd, trimmed);
 		paths.push(resolved);
 	}
 	return paths;
@@ -557,7 +583,8 @@ function parseLsOutput(text: string): { name: string; isDir: boolean }[] {
 	for (const line of lines) {
 		const trimmed = line.trim();
 		if (!trimmed) continue;
-		if (trimmed === "(empty directory)" || trimmed.includes("more lines")) continue;
+		if (trimmed === "(empty directory)" || trimmed.includes("more lines"))
+			continue;
 		if (trimmed.startsWith("[") && trimmed.endsWith("]")) continue;
 		const isDir = trimmed.endsWith("/");
 		const name = isDir ? trimmed.slice(0, -1) : trimmed;
@@ -567,7 +594,9 @@ function parseLsOutput(text: string): { name: string; isDir: boolean }[] {
 }
 
 /** Extract text content from tool result content blocks. */
-function extractTextContent(content: Array<{ type: string; text?: string }>): string {
+function extractTextContent(
+	content: Array<{ type: string; text?: string }>,
+): string {
 	if (!content || !Array.isArray(content)) return "";
 	return content
 		.filter((c) => c.type === "text")
