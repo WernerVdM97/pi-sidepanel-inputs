@@ -13,7 +13,7 @@ Interactive file explorer tree tab for [pi-sidepanel](https://github.com/WernerV
 | `j` / `↓` | Move cursor down |
 | `k` / `↑` | Move cursor up |
 | `Enter` | Expand / collapse directory |
-| `L` | Invoke ls on directory / read on file |
+| `l` | ls directory / read file |
 | `g` | Jump to top |
 | `G` | Jump to bottom |
 | `PgUp` | Page up |

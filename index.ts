@@ -418,11 +418,14 @@ class ExplorerComponent {
 	// ══ Component interface ──────────────────────────────────────────
 
 	handleInput(data: string): void {
-		// L or l: invoke ls on directory or read on file
-		if (data === "L" || data === "l") {
+		// l: invoke ls on directory or read on file
+		if (data === "l") {
 			const entry = this.flatList[this.cursorIdx];
 			if (entry && this.onInvokeTool) {
 				if (entry.node.type === "directory") {
+					// Clear stale children, re-populate from fresh ls
+					entry.node.children = [];
+					entry.node.expanded = false;
 					this.onInvokeTool("ls", { path: entry.node.path });
 				} else {
 					this.onInvokeTool("read", { path: entry.node.path });
@@ -544,30 +547,30 @@ class ExplorerComponent {
 				const cursor = isCursor ? th.fg("accent", ">") : " ";
 
 				let name: string;
-				const isPending = !node.wasRead && this.pendingPaths.has(node.path);
+				const isPending = this.pendingPaths.has(node.path);
 				if (node.type === "directory") {
-					// Folders: orange if read, warning if pending, dim otherwise
-					if (node.wasRead) {
-						name = th.fg("syntaxNumber", th.bold(node.name)) + "/";
-					} else if (isPending) {
+					// Folders: warning if pending, orange if read, dim otherwise
+					if (isPending) {
 						name = th.fg("warning", node.name) + "/";
+					} else if (node.wasRead) {
+						name = th.fg("syntaxNumber", th.bold(node.name)) + "/";
 					} else {
 						name = th.fg("dim", node.name) + "/";
 					}
 				} else if (node.name.endsWith(".md")) {
-					// Markdown: blue if read, warning if pending, dim otherwise
-					if (node.wasRead) {
-						name = th.fg("syntaxFunction", node.name);
-					} else if (isPending) {
+					// Markdown: warning if pending, blue if read, dim otherwise
+					if (isPending) {
 						name = th.fg("warning", node.name);
+					} else if (node.wasRead) {
+						name = th.fg("syntaxFunction", node.name);
 					} else {
 						name = th.fg("dim", node.name);
 					}
 				} else {
-					if (node.wasRead) {
-						name = node.name;
-					} else if (isPending) {
+					if (isPending) {
 						name = th.fg("warning", node.name);
+					} else if (node.wasRead) {
+						name = node.name;
 					} else {
 						name = th.fg("dim", node.name);
 					}
@@ -598,13 +601,14 @@ class ExplorerComponent {
 			}
 		}
 
-		// Keymap footer
+		// Keymap footer (pinned to bottom of 40-line viewport)
 		const th2 = this.theme ?? defaultTheme;
+		while (lines.length < 39) lines.push("");
 		lines.push(
 			th2.fg(
 				"dim",
 				truncateToWidth(
-					" j/k navigate │ Enter expand │ l/L queue │ g/G top/bot",
+					" j/k navigate │ Enter expand │ l ls/read │ g/G top/bot",
 					width,
 					"",
 				),
@@ -686,9 +690,13 @@ export default function (pi: ExtensionAPI) {
 		explorer.markPending(targetPath);
 		pi.events.emit("sidepanel:invalidate", { tabId: "explorer" });
 		if (toolName === "ls") {
-			pi.sendUserMessage(`list the contents of ${targetPath}`, { deliverAs: "followUp" });
+			pi.sendUserMessage(`list the contents of ${targetPath}`, {
+				deliverAs: "followUp",
+			});
 		} else if (toolName === "read") {
-			pi.sendUserMessage(`read the file ${targetPath}`, { deliverAs: "followUp" });
+			pi.sendUserMessage(`read the file ${targetPath}`, {
+				deliverAs: "followUp",
+			});
 		}
 	});
 
