@@ -779,6 +779,9 @@ export default function (pi: ExtensionAPI) {
 		registered = false;
 		explorer.reset();
 
+		// Register tab immediately — framework shows empty state while we replay
+		registerTab();
+
 		try {
 			const entries = ctx.sessionManager.getEntries() as Array<{
 				type: string;
@@ -804,12 +807,7 @@ export default function (pi: ExtensionAPI) {
 			// Cap at last 300 entries to prevent memory blowup on large sessions
 			const capped = entries.slice(-300);
 			let nodeCount = 0;
-			for (let i = 0; i < capped.length; i++) {
-				const e = capped[i]!;
-				// Yield event loop every 10 entries to avoid UI freeze
-				if (i > 0 && i % 10 === 0) {
-					await new Promise((r) => setTimeout(r, 0));
-				}
+			for (const e of capped) {
 				// Hard stop: don't build more than 500 nodes during replay
 				if (nodeCount >= 500) break;
 				if (e.type !== "message") continue;
@@ -883,9 +881,11 @@ export default function (pi: ExtensionAPI) {
 					}
 				}
 			}
-		} finally {
-			// Always register — tree might be empty but tab must exist
-			registerTab();
+
+			// Emit invalidation so framework re-renders with full tree
+			pi.events.emit("sidepanel:invalidate", { tabId: "explorer" });
+		} catch {
+			// Replay failed — tab already registered with empty state
 		}
 	});
 
