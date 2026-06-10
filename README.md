@@ -60,7 +60,9 @@ Tree capped at **500 nodes** with LRU eviction. Per-directory children capped at
 
 ```
 pi-sidepanel-inputs
-  └── index.ts   — tree data model, rendering, event wiring
+  ├── index.ts      — event wiring + registration (thin)
+  └── explorer.ts   — tree data model + rendering (no pi imports;
+                       pi-tui utilities injected — testable in isolation)
 ```
 
 ## License
