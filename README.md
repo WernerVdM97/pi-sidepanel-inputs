@@ -24,7 +24,7 @@ Interactive file explorer tree tab for [pi-sidepanel](https://github.com/WernerV
 Files and directories appear as the agent discovers them. Directories auto-expand when their contents are listed via `ls`. Files change color from dim to normal when explicitly read by the agent, and the *was-read* state propagates up to ancestor directories.
 
 ```
->├── dotVault/
+>├── home/
  │   ├── .pi/
  │   │   └── agent/
  │   │       ├── AGENTS.md      ← agent read this file
