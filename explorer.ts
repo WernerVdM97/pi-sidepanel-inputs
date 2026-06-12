@@ -145,7 +145,9 @@ export function parseFindOutput(text: string, cwd: string): string[] {
 }
 
 /** Parse ls tool output text into {name, isDir} entries. */
-export function parseLsOutput(text: string): { name: string; isDir: boolean }[] {
+export function parseLsOutput(
+	text: string,
+): { name: string; isDir: boolean }[] {
 	const entries: { name: string; isDir: boolean }[] = [];
 	const lines = text.split("\n");
 	for (const line of lines) {
@@ -329,6 +331,26 @@ export class ExplorerComponent {
 		const node = this.ensurePath(parts, absolutePath, "file");
 		node.wasRead = true;
 		this.propagateReadUp(node);
+		this.rebuildFlatList();
+		this.invalidate();
+	}
+
+	/** Ensure a file node exists in the tree WITHOUT marking it as read.
+	 *  Used for pre-scanning (e.g. AGENTS.md files discovered at startup).
+	 *  Idempotent: if the file already exists, does NOT un-mark wasRead. */
+	addDiscoveredFile(absolutePath: string): void {
+		// If already in the tree, don't touch wasRead (could be true from a
+		// prior addFile or session replay).
+		if (this.nodeMap.has(absolutePath)) return;
+
+		const relativePath = path.relative(this.cwd, absolutePath);
+		if (!relativePath || relativePath.startsWith("..")) return;
+
+		const parts = relativePath.split(path.sep);
+		this.ensurePath(parts, absolutePath, "file");
+		// ensurePath creates wasRead=false by default — no need to touch it.
+		// Do NOT propagate wasRead up — parent dirs stay unread until the
+		// agent actually reads a descendant.
 		this.rebuildFlatList();
 		this.invalidate();
 	}
@@ -571,6 +593,12 @@ export class ExplorerComponent {
 			return;
 		}
 
+		// Spacebar: collapse the direct parent directory
+		if (data === " ") {
+			this.collapseParent();
+			return;
+		}
+
 		const moved = this.moveCursor(data);
 		if (!moved) return;
 
@@ -635,6 +663,40 @@ export class ExplorerComponent {
 		this.rebuildFlatList();
 		this.scrollToCursor();
 		this.invalidate();
+	}
+
+	/** Collapse the direct parent directory of the current entry. */
+	private collapseParent(): void {
+		const entry = this.flatList[this.cursorIdx];
+		if (!entry) return;
+
+		// If the cursor is on a root entry (depth 0), toggle it directly.
+		if (entry.depth === 0) {
+			if (entry.node.type === "directory" && entry.node.expanded) {
+				entry.node.expanded = false;
+				this.rebuildFlatList();
+				this.scrollToCursor();
+				this.invalidate();
+			}
+			return;
+		}
+
+		// Find the direct parent (the node whose path is the dirname of
+		// the current entry's path). Collapse that parent.
+		const parentPath = path.dirname(entry.node.path);
+		const parentNode = this.nodeMap.get(parentPath);
+
+		if (parentNode && parentNode.type === "directory" && parentNode.expanded) {
+			parentNode.expanded = false;
+			this.rebuildFlatList();
+			// Move cursor to the parent after collapse
+			this.cursorIdx = this.flatList.findIndex(
+				(e) => e.node.path === parentPath,
+			);
+			if (this.cursorIdx < 0) this.cursorIdx = 0;
+			this.scrollToCursor();
+			this.invalidate();
+		}
 	}
 
 	private scrollToCursor(): void {
@@ -725,32 +787,72 @@ export class ExplorerComponent {
 				const base = `${cursor}${prefix}${conn}`;
 				const baseVw = visibleWidth(base);
 
-				// Token badge: files get dim, directories get purple (syntaxKeyword)
+				// ── Token badge logic ────────────────────────────
+				// Files: always show badge if we have a size (ls or read).
+				//   Read files → text color. Unread → muted.
+				// Directories: show badge in warning/orange, LEFT-aligned
+				//   after the name (not flush-right). Suppress when a
+				//   single child directory has the same total.
 				let tokenEst: number | null = null;
 				let tokenColor = "dim";
-				if (node.type === "file" && node.wasRead && node.fileChars != null) {
+				let isDirBadge = false;
+
+				if (node.type === "file" && node.fileChars != null) {
 					tokenEst = est(node.fileChars);
+					tokenColor = node.wasRead ? "text" : "dim";
 				} else if (
 					node.type === "directory" &&
 					node.wasRead &&
 					node.dirTokens != null &&
 					node.dirTokens > 0
 				) {
-					tokenEst = node.dirTokens;
-					tokenColor = "syntaxKeyword";
+					// Suppress duplicate: if the directory has exactly ONE
+					// visible child that is also a directory, AND that
+					// child has the same dirTokens, skip the parent badge.
+					const visibleChildren = node.expanded ? node.children : [];
+					const singleDirChild =
+						visibleChildren.length === 1 &&
+						visibleChildren[0]!.type === "directory";
+					const sameTokens =
+						singleDirChild && visibleChildren[0]!.dirTokens === node.dirTokens;
+
+					if (!sameTokens) {
+						tokenEst = node.dirTokens;
+						tokenColor = "warning";
+						isDirBadge = true;
+					}
 				}
 
 				if (tokenEst != null) {
 					const tokenStr = th.fg(tokenColor, fmtTokens(tokenEst));
 					const tokenVw = visibleWidth(tokenStr);
-					const maxNameW = width - baseVw - 1 - tokenVw;
-					const nameDisplay =
-						maxNameW > 0 ? truncateToWidth(name, maxNameW, "…", false) : name;
-					const nameVw = visibleWidth(nameDisplay);
-					const padding = " ".repeat(
-						Math.max(1, width - baseVw - nameVw - tokenVw),
-					);
-					lines.push(base + nameDisplay + padding + tokenStr);
+
+					if (isDirBadge) {
+						// Directory badges: left-aligned, 2-space gap after name
+						const gap = "  ";
+						const maxNameW = width - baseVw - 2 - tokenVw;
+						const nameDisplay =
+							maxNameW > 0 ? truncateToWidth(name, maxNameW, "…", false) : name;
+						const nameVw = visibleWidth(nameDisplay);
+						// Truncate name further if needed to fit on one line
+						if (baseVw + nameVw + 2 + tokenVw > width) {
+							const clamped = Math.max(1, width - baseVw - 2 - tokenVw);
+							const clampedName = truncateToWidth(name, clamped, "…", false);
+							lines.push(base + clampedName + gap + tokenStr);
+						} else {
+							lines.push(base + nameDisplay + gap + tokenStr);
+						}
+					} else {
+						// File badges: right-aligned
+						const maxNameW = width - baseVw - 1 - tokenVw;
+						const nameDisplay =
+							maxNameW > 0 ? truncateToWidth(name, maxNameW, "…", false) : name;
+						const nameVw = visibleWidth(nameDisplay);
+						const padding = " ".repeat(
+							Math.max(1, width - baseVw - nameVw - tokenVw),
+						);
+						lines.push(base + nameDisplay + padding + tokenStr);
+					}
 				} else {
 					const line = `${base}${name}`;
 					const vw = visibleWidth(line);

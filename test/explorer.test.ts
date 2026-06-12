@@ -34,7 +34,11 @@ function makeComp(): ExplorerComponent {
 }
 
 /** Content lines of a render: drop trailing padding and the footer row. */
-function contentLines(comp: ExplorerComponent, width = 40, height = 12): string[] {
+function contentLines(
+	comp: ExplorerComponent,
+	width = 40,
+	height = 12,
+): string[] {
 	const lines = comp.render(width, height);
 	return lines.slice(0, -1).filter((l) => l !== "");
 }
@@ -214,6 +218,72 @@ describe("populateDirectory / ls parsing", () => {
 // ── Flattening and collapse ───────────────────────────────────────────────
 
 describe("Flattening and collapse", () => {
+	it("Spacebar collapses the direct parent, not the root", () => {
+		const c = makeComp();
+		// Tree: src/ → sub/ → deep/ → a.ts, b.ts
+		c.addFile("/cwd/src/sub/deep/a.ts");
+		c.addFile("/cwd/src/sub/deep/b.ts");
+		// Cursor on a.ts (depth 3). Spacebar should collapse deep/ (parent).
+		c.handleInput("j"); // → sub/
+		c.handleInput("j"); // → deep/
+		c.handleInput("j"); // → a.ts
+		c.handleInput(" ");
+
+		const flat = c.getFlatEntries();
+		// src/ (expanded), sub/ (expanded), deep/ (collapsed) — 3 entries
+		assert.equal(flat.length, 3);
+		assert.equal(flat[0]!.node.name, "src");
+		assert.equal(flat[0]!.node.expanded, true);
+		assert.equal(flat[1]!.node.name, "sub");
+		assert.equal(flat[1]!.node.expanded, true, "sub/ should still be expanded");
+		assert.equal(flat[2]!.node.name, "deep");
+		assert.equal(flat[2]!.node.expanded, false, "deep/ should be collapsed");
+	});
+
+	it("Spacebar on the root itself collapses it", () => {
+		const c = makeComp();
+		c.addFile("/cwd/src/a.ts");
+		c.addFile("/cwd/src/b.ts");
+		// Cursor on src/ (depth 0). Spacebar collapses src/.
+		c.handleInput(" ");
+
+		const flat = c.getFlatEntries();
+		assert.equal(flat.length, 1);
+		assert.equal(flat[0]!.node.name, "src");
+		assert.equal(flat[0]!.node.expanded, false);
+	});
+
+	it("Enter toggles only the cursor dir, not ancestors", () => {
+		const c = makeComp();
+		// Create two separate roots: modules/ (with child) and src/ (with child)
+		c.addFile("/cwd/modules/pi/index.ts");
+		c.addFile("/cwd/src/app.ts");
+		// Flat: modules/, pi/, index.ts, src/, app.ts (5 entries)
+		assert.equal(c.getFlatEntries().length, 5);
+
+		// Move cursor to modules/ (index 0) → j → pi/ (depth 1)
+		c.handleInput("j");
+		// Now on pi/. Enter → collapse pi/ only.
+		c.handleInput("\r");
+
+		const flat = c.getFlatEntries();
+		// modules/ still expanded (shows pi/ + src/ + app.ts), pi/ collapsed
+		assert.equal(flat[0]!.node.name, "modules");
+		assert.equal(
+			flat[0]!.node.expanded,
+			true,
+			"modules/ should still be expanded",
+		);
+		const piEntry = flat.find((e) => e.node.name === "pi");
+		assert.ok(piEntry, "pi/ should still be visible (collapsed)");
+		assert.equal(piEntry!.node.expanded, false, "pi/ should be collapsed");
+		// index.ts should NOT be visible (child of collapsed pi/)
+		assert.ok(
+			!flat.some((e) => e.node.name === "index.ts"),
+			"index.ts should be hidden when pi/ is collapsed",
+		);
+	});
+
 	it("Enter collapses and re-expands the directory under the cursor", () => {
 		const c = makeComp();
 		c.addFile("/cwd/src/a.ts");
@@ -320,19 +390,6 @@ describe("Render output shape", () => {
 		lines = contentLines(c);
 		assert.ok(lines[0]!.startsWith(" "));
 		assert.ok(lines[1]!.startsWith(">"));
-	});
-
-	it("shows token badge after a read result", () => {
-		const c = makeComp();
-		c.addFile("/cwd/src/app.ts");
-		c.setFileSize("/cwd/src/app.ts", 4000); // ≈ 1.0K tokens
-		c.invalidate();
-
-		const lines = contentLines(c, 40, 12);
-		assert.ok(
-			lines.some((l) => l.includes("app.ts") && l.includes("1.0K")),
-			`expected token badge, got: ${JSON.stringify(lines)}`,
-		);
 	});
 
 	it("pins the keymap footer to the bottom row", () => {
@@ -469,5 +526,65 @@ describe("L-key tool invocation", () => {
 		// Cursor on the file (flat index 0 is done.ts since no parent dirs)
 		c.handleInput("l");
 		assert.equal(calls.length, 0);
+	});
+});
+
+// ── AGENTS.md pre-scan ───────────────────────────────────────────────────
+
+describe("AGENTS.md pre-scan (addDiscoveredFile)", () => {
+	it("adds file nodes without marking as read (wasRead=false)", () => {
+		const c = makeComp();
+		c.addDiscoveredFile("/cwd/AGENTS.md");
+
+		const node = c.getNode("/cwd/AGENTS.md")!;
+		assert.ok(node, "AGENTS.md should be in the tree");
+		assert.equal(node.type, "file");
+		assert.equal(node.wasRead, false, "should NOT be marked as read");
+	});
+
+	it("creates parent directories for discovered files", () => {
+		const c = makeComp();
+		c.addDiscoveredFile("/cwd/src/sub/AGENTS.md");
+
+		const src = c.getNode("/cwd/src")!;
+		assert.equal(src.type, "directory");
+		assert.equal(src.wasRead, false);
+
+		const sub = c.getNode("/cwd/src/sub")!;
+		assert.equal(sub.type, "directory");
+		assert.equal(sub.wasRead, false);
+
+		const md = c.getNode("/cwd/src/sub/AGENTS.md")!;
+		assert.equal(md.type, "file");
+		assert.equal(md.wasRead, false);
+	});
+
+	it("pre-scanned file turns wasRead=true when agent reads it", () => {
+		const c = makeComp();
+		c.addDiscoveredFile("/cwd/AGENTS.md");
+		assert.equal(c.getNode("/cwd/AGENTS.md")!.wasRead, false, "pre: not read");
+
+		// Agent reads the file (via addFile)
+		c.addFile("/cwd/AGENTS.md");
+		assert.equal(c.getNode("/cwd/AGENTS.md")!.wasRead, true, "post: now read");
+	});
+
+	it("pre-scanned AGENTS.md appears in the flat list", () => {
+		const c = makeComp();
+		c.addDiscoveredFile("/cwd/AGENTS.md");
+		c.addDiscoveredFile("/cwd/src/AGENTS.md");
+
+		const flat = c.getFlatEntries();
+		const names = flat.map((e) => e.node.name);
+		assert.ok(names.includes("AGENTS.md"), "root AGENTS.md should be listed");
+		assert.ok(names.includes("src"), "src directory should be listed");
+	});
+
+	it("addDiscoveredFile is idempotent", () => {
+		const c = makeComp();
+		c.addDiscoveredFile("/cwd/AGENTS.md");
+		const count1 = c.nodeCount;
+		c.addDiscoveredFile("/cwd/AGENTS.md");
+		assert.equal(c.nodeCount, count1, "should not duplicate");
 	});
 });

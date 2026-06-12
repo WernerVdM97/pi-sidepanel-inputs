@@ -16,6 +16,7 @@ import {
 	visibleWidth,
 } from "@earendil-works/pi-tui";
 import * as path from "node:path";
+import * as fs from "node:fs/promises";
 import {
 	ExplorerComponent,
 	parseFindOutput,
@@ -32,6 +33,65 @@ function extractTextContent(
 		.filter((c) => c.type === "text")
 		.map((c) => c.text ?? "")
 		.join("");
+}
+
+// ── AGENTS.md pre-scan ───────────────────────────────────────────────────
+
+/** Maximum directory depth for AGENTS.md pre-scan. */
+const MAX_SCAN_DEPTH = 8;
+/** Maximum AGENTS.md files to pre-load (perf safety). */
+const MAX_AGENTS_FILES = 50;
+/** Directories to skip during pre-scan. */
+const SKIP_DIRS = new Set([
+	"node_modules",
+	".git",
+	"dist",
+	"build",
+	".next",
+	"__pycache__",
+	".venv",
+	"vendor",
+	"target", // Rust
+	".direnv",
+]);
+
+/** Recursively scan a directory for AGENTS.md files, adding them
+ *  to the explorer tree as unloaded (wasRead=false). */
+async function preScanAgentsMd(
+	startDir: string,
+	explorer: ExplorerComponent,
+): Promise<void> {
+	let found = 0;
+	const pending: Array<{ dir: string; depth: number }> = [
+		{ dir: startDir, depth: 0 },
+	];
+
+	while (pending.length > 0 && found < MAX_AGENTS_FILES) {
+		const { dir, depth } = pending.shift()!;
+		if (depth > MAX_SCAN_DEPTH) continue;
+
+		let entries: fs.Dirent[];
+		try {
+			entries = await fs.readdir(dir, { withFileTypes: true });
+		} catch {
+			continue; // permission denied, etc.
+		}
+
+		for (const e of entries) {
+			if (e.isDirectory()) {
+				if (!SKIP_DIRS.has(e.name) && !e.name.startsWith(".")) {
+					pending.push({
+						dir: path.join(dir, e.name),
+						depth: depth + 1,
+					});
+				}
+			} else if (e.name === "AGENTS.md") {
+				explorer.addDiscoveredFile(path.join(dir, e.name));
+				found++;
+				if (found >= MAX_AGENTS_FILES) break;
+			}
+		}
+	}
 }
 
 // ── Extension entry point ────────────────────────────────────────────────
@@ -99,6 +159,10 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_start", async (_event: any, ctx: any) => {
 		registered = false;
 		explorer.reset();
+
+		// Pre-scan project for AGENTS.md files — show them grey until the
+		// agent reads them (session replay below marks already-read ones).
+		preScanAgentsMd(cwd, explorer).catch(() => {});
 
 		// Register immediately, flag busy, and yield a frame so the loading
 		// placeholder paints before the synchronous replay runs.
@@ -225,8 +289,10 @@ export default function (pi: ExtensionAPI) {
 		if (event.toolName === "read") {
 			const input = event.input as { path?: string };
 			if (input.path) {
-				explorer.clearPending(input.path);
-				explorer.addFile(input.path);
+				// Resolve to absolute — pre-scan uses absolute paths
+				const absPath = path.resolve(cwd, input.path);
+				explorer.clearPending(absPath);
+				explorer.addFile(absPath);
 			}
 			pi.events.emit("sidepanel:invalidate", { tabId: "explorer" });
 		} else if (event.toolName === "ls") {
@@ -251,9 +317,10 @@ export default function (pi: ExtensionAPI) {
 		if (event.toolName === "read") {
 			const input = event.input as { path?: string };
 			if (input.path) {
+				const absPath = path.resolve(cwd, input.path);
 				const rawText = extractTextContent(event.content);
 				if (rawText) {
-					explorer.setFileSize(input.path, rawText.length);
+					explorer.setFileSize(absPath, rawText.length);
 					pi.events.emit("sidepanel:invalidate", { tabId: "explorer" });
 				}
 			}
