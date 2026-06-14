@@ -42,7 +42,7 @@ export function truncateToWidth(str, width, ellipsis = "...", _pad) {
 const KEYMAP = {
 	tab: ["\t"],
 	"shift+tab": ["\x1b[Z"],
-	enter: ["\r", "\n"],
+	enter: ["\r"],  // \n reserved for ctrl+j
 	escape: ["\x1b"],
 	backspace: ["\x7f", "\b"],
 	up: ["\x1b[A"],
@@ -56,6 +56,8 @@ const KEYMAP = {
 	f2: ["\x1bOQ", "\x1b[12~"],
 	f3: ["\x1bOR", "\x1b[13~"],
 	"ctrl+c": ["\x03"],
+	"ctrl+j": ["\x0a"],
+	"ctrl+k": ["\x0b"],
 };
 
 export function matchesKey(data, key) {

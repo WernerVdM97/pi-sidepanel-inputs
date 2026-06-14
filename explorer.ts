@@ -296,6 +296,7 @@ export class ExplorerComponent {
 			prevPath = currentPath;
 			currentPath = path.dirname(currentPath);
 		}
+		this.invalidate();
 	}
 
 	/** Mark a path as pending (user pressed L, waiting for agent). */
